@@ -36,12 +36,21 @@ import com.example.android.sunshine.app.R;
 import com.example.android.sunshine.app.Utility;
 import com.example.android.sunshine.app.data.WeatherContract;
 import com.example.android.sunshine.app.muzei.WeatherMuzeiSource;
+import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.common.api.GoogleApiClient;
+import com.google.android.gms.common.api.ResultCallback;
+import com.google.android.gms.wearable.Asset;
+import com.google.android.gms.wearable.DataApi;
+import com.google.android.gms.wearable.PutDataMapRequest;
+import com.google.android.gms.wearable.PutDataRequest;
+import com.google.android.gms.wearable.Wearable;
 
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -150,6 +159,7 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                     .build();
 
             URL url = new URL(builtUri.toString());
+            Log.e(LOG_TAG, "URL " + url);
 
             // Create the request to OpenWeatherMap, and open the connection
             urlConnection = (HttpURLConnection) url.openConnection();
@@ -364,7 +374,7 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                 // delete old data so we don't build up an endless history
                 getContext().getContentResolver().delete(WeatherContract.WeatherEntry.CONTENT_URI,
                         WeatherContract.WeatherEntry.COLUMN_DATE + " <= ?",
-                        new String[] {Long.toString(dayTime.setJulianDay(julianStartDay-1))});
+                        new String[]{Long.toString(dayTime.setJulianDay(julianStartDay - 1))});
 
                 updateWidgets();
                 updateMuzei();
@@ -398,7 +408,84 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
         }
     }
 
+    /* CODE FROM: https://github.com/kushalsharma/sunshine-wear/blob/master/app/src/main/java/com/example/android/sunshine/app/sync/SunshineSyncAdapter.java*/
+    private void syncWithWear(Bitmap largeIcon, double high, double low) {
+        Context context = getContext();
+        final GoogleApiClient mGoogleApiClient;
+        boolean mResolvingError = false;
+
+
+        final String WEATHER_PATH = "/weather";
+        final String WEATHER_TEMP_HIGH_KEY = "weather_temp_high_key";
+        final String WEATHER_TEMP_LOW_KEY = "weather_temp_low_key";
+        final String WEATHER_TEMP_ICON_KEY = "weather_temp_icon_key";
+
+        mGoogleApiClient = new GoogleApiClient.Builder(context)
+                .addApi(Wearable.API)
+                .addConnectionCallbacks(new GoogleApiClient.ConnectionCallbacks() {
+                    @Override
+                    public void onConnected(Bundle bundle) {
+                        Log.v("Watch log", "Google API Client was connected");
+                    }
+
+                    @Override
+                    public void onConnectionSuspended(int i) {
+                        Log.v("Watch Log", "Connection to Google API client was suspended");
+                    }
+                })
+                .addOnConnectionFailedListener(new GoogleApiClient.OnConnectionFailedListener() {
+                    @Override
+                    public void onConnectionFailed(ConnectionResult result) {
+                        Log.e("Watch Log", "Connection to Google API client has failed");
+                    }
+                })
+                .build();
+
+        mGoogleApiClient.connect();
+
+
+        Asset asset = toAsset(Bitmap.createScaledBitmap(largeIcon, 52, 52, true));
+
+        PutDataMapRequest putDataMapRequest = PutDataMapRequest.create(WEATHER_PATH);
+        putDataMapRequest.getDataMap().putString(WEATHER_TEMP_HIGH_KEY, Utility.formatTemperature(context, high));
+        putDataMapRequest.getDataMap().putString(WEATHER_TEMP_LOW_KEY, Utility.formatTemperature(context, low));
+        putDataMapRequest.getDataMap().putAsset(WEATHER_TEMP_ICON_KEY, asset);
+        putDataMapRequest.getDataMap().putLong("timestamp", System.currentTimeMillis());
+
+
+        PutDataRequest request = putDataMapRequest.asPutDataRequest();
+        Wearable.DataApi.putDataItem(mGoogleApiClient, request).setResultCallback(new ResultCallback<DataApi.DataItemResult>() {
+            @Override
+            public void onResult(DataApi.DataItemResult dataItemResult) {
+                if (dataItemResult.getStatus().isSuccess()) {
+                    Log.e("Watch Log", "Successfully send weather info");
+                } else {
+                    Log.e("Watch Log", "Failed to send weather info ");
+                }
+                mGoogleApiClient.disconnect();
+            }
+        });
+    }
+
+    private static Asset toAsset(Bitmap bitmap) {
+        ByteArrayOutputStream byteStream = null;
+        try {
+            byteStream = new ByteArrayOutputStream();
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, byteStream);
+            return Asset.createFromBytes(byteStream.toByteArray());
+        } finally {
+            if (null != byteStream) {
+                try {
+                    byteStream.close();
+                } catch (IOException e) {
+                    // ignore
+                }
+            }
+        }
+    }
+
     private void notifyWeather() {
+        Log.e(LOG_TAG, "Trying to notify weather");
         Context context = getContext();
         //checking the last update and notify if it' the first of the day
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
@@ -494,6 +581,9 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                             (NotificationManager) getContext().getSystemService(Context.NOTIFICATION_SERVICE);
                     // WEATHER_NOTIFICATION_ID allows you to update the notification later on.
                     mNotificationManager.notify(WEATHER_NOTIFICATION_ID, mBuilder.build());
+
+                    // WEAR
+                    syncWithWear(largeIcon, high, low);
 
                     //refreshing last sync
                     SharedPreferences.Editor editor = prefs.edit();
